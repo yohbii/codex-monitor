@@ -1,0 +1,26 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "codex-monitor",
+  "version": "0.1.1",
+  "description": "Background command and log monitoring with events delivered to the originating Codex chat.",
+  "author": {
+    "name": "linlihong"
+  },
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Codex Monitor",
+        "shortDescription": "Agent-managed background watch",
+        "longDescription": "Codex starts background watchers when a task needs them, receives meaningful events in the originating chat, and decides when to continue or stop.",
+        "developerName": "linlihong",
+        "category": "Productivity",
+        "capabilities": [
+          "Local"
+        ],
+        "logo": "./assets/monitor.svg",
+        "composerIcon": "./assets/monitor.svg",
+        "defaultPrompt": "Watch this task and continue when its status changes."
+      }
+    }
+  }
+}

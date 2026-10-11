@@ -1,0 +1,10 @@
+{
+  "name": "codex-monitor",
+  "interface": { "displayName": "Codex Monitor" },
+  "plugins": [{
+    "name": "codex-monitor",
+    "source": { "source": "local", "path": "./" },
+    "policy": { "installation": "AVAILABLE", "authentication": "ON_INSTALL" },
+    "category": "Productivity"
+  }]
+}
