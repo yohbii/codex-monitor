@@ -1,14 +1,14 @@
 {
   "name": "codex-monitor",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "private": true,
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "build": "esbuild src/server.js --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outfile=dist/server.mjs",
-    "test": "node --test test/monitor.test.js",
+    "build": "esbuild src/server.js src/worker.js --bundle --platform=node --format=esm --banner:js=\"import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);\" --outdir=dist --out-extension:.js=.mjs",
+    "test": "node --test test/*.test.js",
     "install:codex": "node scripts/install.mjs"
   },
   "dependencies": {

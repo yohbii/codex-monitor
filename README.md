@@ -83,7 +83,7 @@ The plugin exposes three MCP tools:
 | Tool | Purpose |
 | --- | --- |
 | `monitor_start` | Start a background watch and immediately return its ID |
-| `monitor_list` | Inspect watches owned by the current connection, including status and diagnostics |
+| `monitor_list` | Find watches across reconnects, including status and diagnostics |
 | `monitor_stop` | Stop a watch and its child processes |
 
 <details>
@@ -99,7 +99,7 @@ The plugin exposes three MCP tools:
 | `thread_id` | Originating chat UUID, obtained by the agent with `printenv CODEX_THREAD_ID` |
 | `timeout_seconds` | Optional watch lifetime, chosen by the agent; defaults to 300 seconds |
 
-`monitor_list` takes no parameters. `monitor_stop` takes `id`, the monitor ID returned at startup.
+`monitor_list` accepts an optional `thread_id` to filter by chat; omit it to list watches on this host. `monitor_stop` takes `id`, the monitor ID returned at startup.
 
 The observation script filters logs, queries status, and detects changes. Every stdout line triggers event delivery, so scripts should emit only when a condition is met or a relevant failure occurs. Send startup messages, heartbeats, and diagnostics to stderr. Process exit and timeout also generate events.
 
@@ -110,7 +110,7 @@ Events include the monitor ID, description, working directory, and output. They 
 <details>
 <summary>Lifecycle and logs</summary>
 
-Watches live as long as their owning MCP connection. They continue across chat switches while that connection remains open. Closing the connection, reloading the server, or quitting Codex cleans up the observation processes.
+Each watch runs in an independent worker. Chat unloads, MCP disconnects, and server reloads leave it running, and a reconnected chat can list or stop it. Workers follow the Codex host process that launched the MCP server. When that process exits, its watches stop with status `host_exited`. In remote desktop setups, this is the remote Codex app-server, which can outlive a desktop window. A new host process does not automatically restart stopped watches.
 
 Start the actual build or training job separately. Stopping a watch terminates the observation script and its child processes. Events already queued in Codex are not withdrawn. A timeout ends the current watch; the agent decides whether to renew it based on the original task.
 
@@ -119,6 +119,7 @@ Logs are stored in `~/.local/state/codex-monitor/<thread>/<monitor>/` by default
 - `stdout.log`, `stderr.log`: output from the observation script.
 - `delivery.jsonl`: successful and failed event deliveries.
 - `result.json`: the watch state when its process exits.
+- `state.json`: current status, worker PID, and Codex host PID, used across reconnects.
 
 `monitor_list` returns the actual log directory, the stderr tail, and any `delivery_error`. Delivery failures are recorded and stop the watch if it is still running.
 

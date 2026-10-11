@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline';
 import { promisify } from 'node:util';
 
 const runFile = promisify(execFile);
-const stateRoot = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'codex-monitor');
+export const stateRoot = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'codex-monitor');
 
 export async function deliverToCodex(threadId, event) {
   await runFile('codex', ['queue', '--thread', threadId, '--message',
@@ -22,9 +22,10 @@ function signalGroup(child, signal) {
 }
 
 export class Monitors {
-  constructor({ root = stateRoot, deliver = deliverToCodex } = {}) {
+  constructor({ root = stateRoot, deliver = deliverToCodex, onChange = () => {} } = {}) {
     this.root = root;
     this.deliver = deliver;
+    this.onChange = onChange;
     this.items = new Map();
     this.closing = false;
   }
@@ -68,6 +69,7 @@ export class Monitors {
         this.enqueue(item, { type: 'deadline', timeout_seconds });
       }
       log('result.json', JSON.stringify(this.summary(item)));
+      this.onChange(this.summary(item));
       this.flush(item);
       resolve();
     }));
@@ -84,6 +86,7 @@ export class Monitors {
       throw error;
     }
     item.deadline = setTimeout(() => this.terminate(item, 'timed_out'), timeout_seconds * 1000);
+    this.onChange(this.summary(item));
     return this.summary(item);
   }
 
@@ -118,12 +121,14 @@ export class Monitors {
         console.error(`Monitor ${item.id}: delivery failed: ${error.message}`);
         this.terminate(item, 'delivery_failed');
       }
+      this.onChange(this.summary(item));
     });
   }
 
   terminate(item, status) {
     if (item.status !== 'running') return;
     item.status = status;
+    this.onChange(this.summary(item));
     clearTimeout(item.deadline);
     if (status !== 'timed_out') {
       clearTimeout(item.flushTimer);

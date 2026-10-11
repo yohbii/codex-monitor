@@ -62,7 +62,7 @@ test('delivery failure is recorded and stops observation; invalid cwd fails star
   await assert.rejects(monitors.start({ command: 'true', cwd: join(root, 'absent'), description: 'invalid cwd', thread_id }), /ENOENT/);
 });
 
-test('closing the MCP owner cleans up watchers without notifications', async t => {
+test('shutting down the worker cleans up watchers without notifications', async t => {
   const { monitors, deliveries, root } = await setup(t);
   const watch = await monitors.start({ command: 'sleep 30', cwd: root, description: 'shutdown', thread_id });
   const pid = monitors.items.get(watch.id).child.pid;

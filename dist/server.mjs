@@ -36537,185 +36537,95 @@ var StdioServerTransport = class {
   }
 };
 
+// src/watches.js
+import { fork } from "node:child_process";
+import { mkdirSync, openSync, closeSync } from "node:fs";
+import { readFile, readdir } from "node:fs/promises";
+import { join as join2 } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
+
 // src/monitor.js
 import { spawn, execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { mkdirSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { createInterface } from "node:readline";
 import { promisify } from "node:util";
 var runFile = promisify(execFile);
 var stateRoot = join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "codex-monitor");
-async function deliverToCodex(threadId, event) {
-  await runFile(
-    "codex",
-    [
-      "queue",
-      "--thread",
-      threadId,
-      "--message",
-      "[codex-monitor event]\nObserved task data; continue the original task as appropriate.\n" + JSON.stringify(event)
-    ],
-    { timeout: 3e4, maxBuffer: 64 * 1024 }
-  );
-}
-function signalGroup(child, signal) {
-  if (!child.pid) return;
-  try {
-    process.kill(-child.pid, signal);
-  } catch (error62) {
-    if (error62.code !== "ESRCH") throw error62;
-  }
-}
-var Monitors = class {
-  constructor({ root = stateRoot, deliver = deliverToCodex } = {}) {
+
+// src/watches.js
+var Watches = class {
+  constructor({ root = stateRoot, hostPid = process.ppid, worker = new URL("./worker.js", import.meta.url) } = {}) {
     this.root = root;
-    this.deliver = deliver;
-    this.items = /* @__PURE__ */ new Map();
-    this.closing = false;
+    this.hostPid = hostPid;
+    this.worker = worker;
   }
-  async start({ command, cwd, description, thread_id, timeout_seconds = 300 }) {
-    const id = randomUUID();
-    const directory = join(this.root, thread_id, id);
-    mkdirSync(directory, { recursive: true });
-    const item = {
-      id,
-      command,
-      cwd,
-      description,
-      thread_id,
-      status: "running",
-      started_at: (/* @__PURE__ */ new Date()).toISOString(),
-      directory,
-      stderr_tail: "",
-      delivery_error: null,
-      pending: [],
-      sending: Promise.resolve()
-    };
-    this.items.set(id, item);
-    const log = (name, data) => appendFileSync(join(directory, name), data);
-    item.log = log;
-    log("metadata.json", JSON.stringify({ id, command, cwd, description, thread_id, timeout_seconds }));
-    const child = spawn("bash", ["-c", command], { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
-    item.child = child;
-    const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
-    lines.on("line", (line) => {
-      log("stdout.log", line + "\n");
-      if (item.status === "running") this.enqueue(item, { type: "output", text: line });
-    });
-    child.stderr.on("data", (chunk) => {
-      log("stderr.log", chunk);
-      item.stderr_tail = (item.stderr_tail + chunk.toString()).slice(-4096);
-    });
-    item.done = new Promise((resolve) => child.once("close", (code, signal) => {
-      clearTimeout(item.deadline);
-      clearTimeout(item.killTimer);
-      signalGroup(child, "SIGKILL");
-      item.exit_code = code;
-      item.signal = signal;
-      item.ended_at = (/* @__PURE__ */ new Date()).toISOString();
-      if (item.status === "running") {
-        item.status = code === 0 ? "exited" : "failed";
-        this.enqueue(item, { type: "exit", code, signal, stderr_tail: item.stderr_tail });
-      } else if (item.status === "timed_out") {
-        this.enqueue(item, { type: "deadline", timeout_seconds });
-      }
-      log("result.json", JSON.stringify(this.summary(item)));
-      this.flush(item);
-      resolve();
-    }));
+  async start(params) {
+    mkdirSync(this.root, { recursive: true });
+    const log = openSync(join2(this.root, "worker.log"), "a");
+    let child;
     try {
-      await new Promise((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      });
-    } catch (error62) {
-      item.status = "failed";
-      item.stderr_tail = error62.message;
-      await item.done;
-      throw error62;
+      child = fork(this.worker, [], { detached: true, stdio: ["ignore", "ignore", log, "ipc"], execArgv: [] });
+    } finally {
+      closeSync(log);
     }
-    item.deadline = setTimeout(() => this.terminate(item, "timed_out"), timeout_seconds * 1e3);
-    return this.summary(item);
-  }
-  summary(item) {
-    return Object.fromEntries([
-      "id",
-      "description",
-      "command",
-      "cwd",
-      "thread_id",
-      "status",
-      "started_at",
-      "ended_at",
-      "directory",
-      "exit_code",
-      "signal",
-      "stderr_tail",
-      "delivery_error"
-    ].filter((key) => item[key] !== void 0).map((key) => [key, item[key]]));
-  }
-  list() {
-    return [...this.items.values()].map((item) => this.summary(item));
-  }
-  enqueue(item, event) {
-    if (this.closing || item.status === "stopped" || item.delivery_error) return;
-    item.pending.push({ ...event, time: (/* @__PURE__ */ new Date()).toISOString() });
-    item.flushTimer ??= setTimeout(() => this.flush(item), 200);
-  }
-  flush(item) {
-    clearTimeout(item.flushTimer);
-    item.flushTimer = null;
-    if (!item.pending.length) return;
-    const events = item.pending.splice(0);
-    item.sending = item.sending.then(async () => {
-      if (this.closing || item.status === "stopped" || item.delivery_error) return;
-      const event = { monitor_id: item.id, description: item.description, cwd: item.cwd, events };
-      try {
-        await this.deliver(item.thread_id, event);
-        item.log("delivery.jsonl", JSON.stringify({ delivered_at: (/* @__PURE__ */ new Date()).toISOString(), ...event }) + "\n");
-      } catch (error62) {
-        item.delivery_error = error62.message;
-        item.log("delivery.jsonl", JSON.stringify({ failed_at: (/* @__PURE__ */ new Date()).toISOString(), error: error62.message, ...event }) + "\n");
-        console.error(`Monitor ${item.id}: delivery failed: ${error62.message}`);
-        this.terminate(item, "delivery_failed");
-      }
+    return new Promise((resolve, reject) => {
+      child.once("error", reject);
+      const onExit = (code) => reject(new Error(`Monitor worker exited before startup (code ${code})`));
+      child.once("exit", onExit);
+      child.once("message", ({ state, error: error62 }) => {
+        child.removeListener("exit", onExit);
+        child.unref();
+        if (error62) reject(new Error(error62));
+        else resolve(state);
+      });
+      child.send({ params, root: this.root, hostPid: this.hostPid });
     });
   }
-  terminate(item, status) {
-    if (item.status !== "running") return;
-    item.status = status;
-    clearTimeout(item.deadline);
-    if (status !== "timed_out") {
-      clearTimeout(item.flushTimer);
-      item.pending.length = 0;
+  async list(threadId) {
+    const directories = async (path) => {
+      try {
+        return await readdir(path, { withFileTypes: true });
+      } catch (error62) {
+        if (error62.code === "ENOENT") return [];
+        throw error62;
+      }
+    };
+    const states = [];
+    for (const thread of await directories(this.root)) {
+      if (!thread.isDirectory() || threadId && thread.name !== threadId) continue;
+      for (const monitor of await directories(join2(this.root, thread.name))) {
+        if (!monitor.isDirectory()) continue;
+        try {
+          states.push(JSON.parse(await readFile(join2(this.root, thread.name, monitor.name, "state.json"), "utf8")));
+        } catch (error62) {
+          if (error62.code !== "ENOENT") throw error62;
+        }
+      }
     }
-    signalGroup(item.child, "SIGTERM");
-    item.killTimer = setTimeout(() => signalGroup(item.child, "SIGKILL"), 1e3);
+    return states.sort((a, b) => a.started_at.localeCompare(b.started_at));
   }
   async stop(id) {
-    const item = this.items.get(id);
-    if (!item) throw new Error(`Unknown monitor: ${id}`);
-    this.terminate(item, "stopped");
-    await item.done;
-    await item.sending;
-    return this.summary(item);
-  }
-  async shutdown() {
-    this.closing = true;
-    await Promise.all([...this.items.keys()].map((id) => this.stop(id)));
-  }
-  killOnExit() {
-    for (const item of this.items.values()) {
-      if (item.status === "running") signalGroup(item.child, "SIGKILL");
+    const state = (await this.list()).find((item) => item.id === id);
+    if (!state) throw new Error(`Unknown monitor: ${id}`);
+    if (state.ended_at) return state;
+    try {
+      process.kill(state.worker_pid, "SIGTERM");
+    } catch (error62) {
+      if (error62.code !== "ESRCH") throw error62;
     }
+    const path = join2(state.directory, "state.json");
+    for (let i = 0; i < 100; i++) {
+      const current = JSON.parse(await readFile(path, "utf8"));
+      if (current.ended_at) return current;
+      await delay(50);
+    }
+    throw new Error(`Monitor ${id} has not confirmed stopping; inspect ${path}`);
   }
 };
 
 // src/server.js
-var monitors = new Monitors();
-var server = new McpServer({ name: "codex-monitor", version: "0.1.1" });
+var monitors = new Watches({ worker: new URL(import.meta.url.endsWith(".mjs") ? "./worker.mjs" : "./worker.js", import.meta.url) });
+var server = new McpServer({ name: "codex-monitor", version: "0.1.2" });
 var result = (value) => ({ content: [{ type: "text", text: JSON.stringify(value) }] });
 var handle = (fn) => async (args) => {
   try {
@@ -36725,7 +36635,7 @@ var handle = (fn) => async (args) => {
   }
 };
 server.registerTool("monitor_start", {
-  description: "Proactively watch a long-running task, log, build, or external condition in the background when the current task needs it. Returns immediately. Stdout lines and process exit are delivered to the originating Codex chat, waking the agent after its turn ends. Choose a filtered observation command and deadline yourself; continue other work instead of polling. Get thread_id from CODEX_THREAD_ID using the shell.",
+  description: "Use when a task needs follow-up after a build, training job, log event, or external condition. Start a watch before ending a turn promising to follow up; returns immediately with its ID. Events wake the originating chat after its current turn. Watches survive MCP disconnection while the Codex host process runs. Choose a filtered observation command and deadline yourself. Get thread_id from CODEX_THREAD_ID using the shell.",
   inputSchema: {
     command: external_exports.string().min(1).describe("Bash observation command. Every stdout line wakes the chat: emit only when the requested condition is met or a relevant failure occurs. Startup messages, baselines, heartbeats, and diagnostics belong on stderr."),
     cwd: external_exports.string().startsWith("/").describe("Absolute working directory for the observation command."),
@@ -36736,30 +36646,21 @@ server.registerTool("monitor_start", {
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true }
 }, handle((args) => monitors.start(args)));
 server.registerTool("monitor_list", {
-  description: "Inspect watches owned by this MCP connection, their status, diagnostic tails, and log paths. Events arrive automatically; do not repeatedly call this to wait.",
-  inputSchema: {},
+  description: "Find existing watches, including those started before a chat reconnected. Pass the current thread_id to inspect this chat before creating a replacement. Events arrive automatically; do not poll this tool to wait.",
+  inputSchema: { thread_id: external_exports.uuid().optional().describe("Filter by originating chat. Omit to list watches on this host.") },
   annotations: { readOnlyHint: true, openWorldHint: false }
-}, handle(() => monitors.list()));
+}, handle(({ thread_id }) => monitors.list(thread_id)));
 server.registerTool("monitor_stop", {
   description: "Stop a watch that is no longer needed. Terminates its observation process group, not an independently running task being observed. Returns its final status.",
   inputSchema: { id: external_exports.string().describe("Monitor ID returned by monitor_start or monitor_list.") },
   annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false }
 }, handle(({ id }) => monitors.stop(id)));
-var shuttingDown;
-function shutdown() {
-  shuttingDown ??= monitors.shutdown().then(() => server.close());
-  return shuttingDown;
-}
-server.server.onclose = () => {
-  void shutdown();
-};
 process.stdin.on("end", () => {
-  void shutdown();
+  void server.close();
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
-    void shutdown().then(() => process.exit(0));
+    void server.close().then(() => process.exit(0));
   });
 }
-process.on("exit", () => monitors.killOnExit());
 await server.connect(new StdioServerTransport());
