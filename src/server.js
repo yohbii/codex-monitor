@@ -2,9 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { z } from 'zod';
 import { Watches } from './watches.js';
+import { captureResumeParams } from './delivery.js';
 
 const monitors = new Watches({ worker: new URL(import.meta.url.endsWith('.mjs') ? './worker.mjs' : './worker.js', import.meta.url) });
-const server = new McpServer({ name: 'codex-monitor', version: '0.1.2' });
+const server = new McpServer({ name: 'codex-monitor', version: '0.1.3' });
 const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }] });
 const handle = fn => async args => {
   try { return result(await fn(args)); }
@@ -21,7 +22,7 @@ server.registerTool('monitor_start', {
     timeout_seconds: z.number().positive().max(2147483).optional().describe('Watch lifetime; default 300 seconds. Choose according to the task, and renew when useful.'),
   },
   annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-}, handle(args => monitors.start(args)));
+}, handle(async args => monitors.start({ ...args, resume_params: await captureResumeParams(args.thread_id) })));
 
 server.registerTool('monitor_list', {
   description: 'Find existing watches, including those started before a chat reconnected. Pass the current thread_id to inspect this chat before creating a replacement. Events arrive automatically; do not poll this tool to wait.',

@@ -7,6 +7,8 @@ import { spawn, fork } from 'node:child_process';
 import { once } from 'node:events';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
+import { createServer } from 'node:http';
+import { WebSocketServer } from 'ws';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Watches } from '../src/watches.js';
@@ -31,10 +33,42 @@ test('native MCP disconnect preserves a quiet watch; reconnect can receive event
     for (const state of await watches.list()) await watches.stop(state.id);
     await rm(dir, { recursive: true, force: true });
   });
-  // The queue substitute records delivery arguments; no test events reach real chats.
-  await mkdir(join(dir, 'bin'));
-  await writeFile(join(dir, 'bin/codex'), `#!${process.execPath}\nrequire('node:fs').appendFileSync(process.env.DELIVERIES, JSON.stringify(process.argv.slice(2))+'\\n');\n`, { mode: 0o755 });
-  const env = { ...process.env, XDG_STATE_HOME: dir, PATH: `${join(dir, 'bin')}:${process.env.PATH}`, DELIVERIES: join(dir, 'delivered.jsonl') };
+  // Protocol fixture only: real agent continuation is covered by host acceptance.
+  await mkdir(join(dir, 'app-server-control'));
+  const http = createServer();
+  const ws = new WebSocketServer({ server: http });
+  const deliveries = [];
+  ws.on('connection', socket => {
+    let resumed = false;
+    let resumeParams;
+    socket.on('message', bytes => {
+      const message = JSON.parse(bytes);
+      if (!message.id) return;
+      let result = {};
+      if (message.method === 'thread/read') result = { thread: { status: { type: 'notLoaded' } } };
+      if (message.method === 'thread/resume') {
+        assert.equal(message.params.threadId, thread_id);
+        resumed = true;
+        resumeParams = message.params;
+        result = { cwd: dir, runtimeWorkspaceRoots: [dir], approvalPolicy: 'on-request',
+          approvalsReviewer: 'user', activePermissionProfile: { id: ':workspace' },
+          model: 'test-model', modelProvider: 'test', reasoningEffort: 'high', serviceTier: null };
+      }
+      if (message.method === 'thread/queue/add') {
+        assert.ok(resumed, 'An unloaded thread must be resumed before enqueueing');
+        assert.equal(resumeParams.permissions, ':workspace');
+        assert.equal(resumeParams.approvalPolicy, 'on-request');
+        assert.deepEqual(resumeParams.runtimeWorkspaceRoots, [dir]);
+        deliveries.push(message.params);
+        result = { queuedSubmission: { id: 'queued-test-event' } };
+      }
+      socket.send(JSON.stringify({ id: message.id, result }));
+    });
+  });
+  http.listen(join(dir, 'app-server-control', 'app-server-control.sock'));
+  await once(http, 'listening');
+  t.after(() => { ws.close(); http.close(); });
+  const env = { ...process.env, XDG_STATE_HOME: dir, CODEX_HOME: dir };
   async function connect() {
     const client = new Client({ name: 'monitor-reconnect-test', version: '1' });
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [server], env }));
@@ -53,7 +87,7 @@ test('native MCP disconnect preserves a quiet watch; reconnect can receive event
   });
   await first.close();
   await delay(150);
-  await assert.rejects(readFile(env.DELIVERIES), { code: 'ENOENT' });
+  assert.equal(deliveries.length, 0);
   assert.doesNotThrow(() => process.kill(watch.worker_pid, 0));
   const second = await connect();
   const listed = await call(second, 'monitor_list', { thread_id });
@@ -62,14 +96,10 @@ test('native MCP disconnect preserves a quiet watch; reconnect can receive event
   await writeFile(join(dir, 'ready'), 'ready');
   const finished = await until(async () => (await watches.list()).find(s => s.id === watch.id && s.ended_at));
   assert.equal(finished.exit_code, 0);
-  await until(async () => {
-    try { return (await readFile(env.DELIVERIES, 'utf8')).trim(); }
-    catch (error) { if (error.code !== 'ENOENT') throw error; }
-  });
-  const deliveries = (await readFile(env.DELIVERIES, 'utf8')).trim().split('\n').map(JSON.parse);
+  await until(async () => deliveries.length);
   assert.equal(deliveries.length, 1);
-  assert.equal(deliveries[0][2], thread_id);
-  const event = JSON.parse(deliveries[0][4].split('\n').at(-1));
+  assert.equal(deliveries[0].threadId, thread_id);
+  const event = JSON.parse(deliveries[0].input[0].text.split('\n').at(-1));
   assert.equal(event.monitor_id, watch.id);
   assert.deepEqual(event.events.filter(e => e.type === 'output').map(e => e.text), ['ready']);
 
@@ -85,7 +115,7 @@ test('native MCP disconnect preserves a quiet watch; reconnect can receive event
   const observer = Number(await readFile(join(dir, 'observer.pid'), 'utf8'));
   assert.throws(() => process.kill(-observer, 0), { code: 'ESRCH' });
   assert.doesNotThrow(() => process.kill(job.pid, 0));
-  assert.equal((await readFile(env.DELIVERIES, 'utf8')).trim().split('\n').length, 1);
+  assert.equal(deliveries.length, 1);
 });
 
 test('exiting the Codex host stops its detached observation worker', async t => {

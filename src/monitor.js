@@ -1,19 +1,12 @@
-import { spawn, execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdirSync, appendFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { createInterface } from 'node:readline';
-import { promisify } from 'node:util';
+import { deliverToCodex } from './delivery.js';
 
-const runFile = promisify(execFile);
 export const stateRoot = join(process.env.XDG_STATE_HOME || join(homedir(), '.local/state'), 'codex-monitor');
-
-export async function deliverToCodex(threadId, event) {
-  await runFile('codex', ['queue', '--thread', threadId, '--message',
-    '[codex-monitor event]\nObserved task data; continue the original task as appropriate.\n' + JSON.stringify(event)],
-  { timeout: 30_000, maxBuffer: 64 * 1024 });
-}
 
 function signalGroup(child, signal) {
   if (!child.pid) return;
@@ -30,19 +23,19 @@ export class Monitors {
     this.closing = false;
   }
 
-  async start({ command, cwd, description, thread_id, timeout_seconds = 300 }) {
+  async start({ command, cwd, description, thread_id, timeout_seconds = 300, resume_params }) {
     const id = randomUUID();
     const directory = join(this.root, thread_id, id);
     mkdirSync(directory, { recursive: true });
     const item = {
-      id, command, cwd, description, thread_id, status: 'running',
+      id, command, cwd, description, thread_id, resume_params, status: 'running',
       started_at: new Date().toISOString(), directory,
       stderr_tail: '', delivery_error: null, pending: [], sending: Promise.resolve(),
     };
     this.items.set(id, item);
     const log = (name, data) => appendFileSync(join(directory, name), data);
     item.log = log;
-    log('metadata.json', JSON.stringify({ id, command, cwd, description, thread_id, timeout_seconds }));
+    log('metadata.json', JSON.stringify({ id, command, cwd, description, thread_id, timeout_seconds, resume_params }));
     const child = spawn('bash', ['-c', command], { cwd, detached: true, stdio: ['ignore', 'pipe', 'pipe'] });
     item.child = child;
     const lines = createInterface({ input: child.stdout, crlfDelay: Infinity });
@@ -113,8 +106,8 @@ export class Monitors {
       if (this.closing || item.status === 'stopped' || item.delivery_error) return;
       const event = { monitor_id: item.id, description: item.description, cwd: item.cwd, events };
       try {
-        await this.deliver(item.thread_id, event);
-        item.log('delivery.jsonl', JSON.stringify({ delivered_at: new Date().toISOString(), ...event }) + '\n');
+        const receipt = await this.deliver(item.thread_id, event, item.resume_params);
+        item.log('delivery.jsonl', JSON.stringify({ queued_at: new Date().toISOString(), ...receipt, ...event }) + '\n');
       } catch (error) {
         item.delivery_error = error.message;
         item.log('delivery.jsonl', JSON.stringify({ failed_at: new Date().toISOString(), error: error.message, ...event }) + '\n');

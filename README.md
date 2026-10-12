@@ -28,7 +28,7 @@ Send this message to Codex:
 Install Codex Monitor from https://github.com/yohbii/codex-monitor and follow the README to complete setup.
 ```
 
-Requires **Linux, Bash, Node.js 22+**, and an authenticated Codex CLI with the `plugin`, `mcp`, and `queue` commands. Tested with Codex CLI 0.160.1. Run `codex queue --help` to check that your CLI supports event delivery.
+Requires **Linux, Bash, Node.js 22+**, and an authenticated, running Codex app-server on the same host. Tested with Codex CLI 0.160.1 and Codex Desktop. The plugin connects to the local app-server control socket under `CODEX_HOME` (default `~/.codex`).
 
 After installation, reload the MCP configuration or restart Codex.
 
@@ -103,7 +103,7 @@ The plugin exposes three MCP tools:
 
 The observation script filters logs, queries status, and detects changes. Every stdout line triggers event delivery, so scripts should emit only when a condition is met or a relevant failure occurs. Send startup messages, heartbeats, and diagnostics to stderr. Process exit and timeout also generate events.
 
-Events include the monitor ID, description, working directory, and output. They return to the original chat through `codex queue`. If the chat is busy, events wait in the queue until the current turn ends.
+Events include the monitor ID, description, working directory, and output. The plugin resumes the original chat through the running app-server before adding the event to its queue, so an unloaded chat can continue. It restores the permissions, workspace, and model settings captured when the watch started. An already loaded chat keeps its current settings. If the chat is busy, events wait until the current turn ends.
 
 </details>
 
@@ -117,7 +117,7 @@ Start the actual build or training job separately. Stopping a watch terminates t
 Logs are stored in `~/.local/state/codex-monitor/<thread>/<monitor>/` by default. If `XDG_STATE_HOME` is set, they are stored under its `codex-monitor/` directory instead.
 
 - `stdout.log`, `stderr.log`: output from the observation script.
-- `delivery.jsonl`: successful and failed event deliveries.
+- `delivery.jsonl`: queue receipts (with submission IDs) and delivery failures. A queue receipt confirms enqueueing, not successful task completion.
 - `result.json`: the watch state when its process exits.
 - `state.json`: current status, worker PID, and Codex host PID, used across reconnects.
 
